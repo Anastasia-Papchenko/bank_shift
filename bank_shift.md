@@ -12,6 +12,9 @@
 - [4](#4) 
 - [5](#5)
 - [6](#6)
+- [7](#7)
+- [8](#8)
+- [9](#9)
 
 
 <!-- TOC --><a name="0"></a>
@@ -304,4 +307,227 @@ ORDER BY
 <!-- TOC --><a name="6"></a>
 **6. Сформируйте выборку, в которую попадут клиенты, у которых были операции по счетам за прошедший месяц от текущей даты. Выведите клиента и сумму операций за день в разрезе даты.**
 
+(now: 2025-11-28)
+
 [Вверх](#00)
+
+```sql
+SELECT 
+    c.id AS client_id,
+    c.name AS client_name,
+    DATE(r.oper_date) AS operation_date,
+    SUM(
+        CASE 
+            WHEN r.dt = 0 THEN r.sum    
+            ELSE -r.sum                 
+        END
+    ) AS daily_operations_amount
+FROM records r
+JOIN accounts a ON r.acc_ref = a.id
+JOIN clients c ON a.client_ref = c.id
+WHERE r.oper_date >= CURRENT_DATE - INTERVAL '1 month'
+  AND r.oper_date <= CURRENT_DATE
+GROUP BY 
+    c.id, 
+    c.name, 
+    DATE(r.oper_date)
+ORDER BY 
+    operation_date DESC, 
+    c.name;
+```
+```Вывод:```
+| client_id | client_name               | operation_date | daily_operations_amount |
+|-----------|---------------------------|----------------|-------------------------|
+| 4         | Габец Евгения Владимировна| 2025-11-23     | -5000.00                |
+| 5         | Сукнева Наталья Федоровна | 2025-11-18     | 10000.00                |
+| 4         | Габец Евгения Владимировна| 2025-11-13     | -2000.00                |
+| 5         | Сукнева Наталья Федоровна | 2025-11-08     | 15000.00                |
+| 4         | Габец Евгения Владимировна| 2025-11-03     | -3000.00                |
+
+<!-- TOC --><a name="7"></a>
+**7. В результате сбоя в базе данных разъехалась информация между остатками и операциями по счетам. Напишите нормализацию (процедуру выравнивающую данные), которая найдет такие счета и восстановит остатки по счету.**
+
+[Вверх](#00)
+
+```1.Находим счета с расхождениями```
+```sql  
+SELECT 
+    a.id as account_id,
+    a.acc_num as account_number,
+    a.name as account_name,
+    a.saldo as current_saldo,
+    SUM(CASE 
+        WHEN r.dt = 0 THEN r.sum  
+        ELSE -r.sum              
+    END) as calculated_saldo,
+    a.saldo - SUM(CASE 
+        WHEN r.dt = 0 THEN r.sum
+        ELSE -r.sum
+    END) as discrepancy
+FROM accounts a
+JOIN records r ON a.id = r.acc_ref
+GROUP BY a.id, a.acc_num, a.name, a.saldo
+HAVING a.saldo != SUM(CASE 
+    WHEN r.dt = 0 THEN r.sum
+    ELSE -r.sum
+END);
+```
+| account_id | account_number       | account_name                       | current_saldo | calculated_saldo | discrepancy |
+|------------|----------------------|------------------------------------|---------------|------------------|-------------|
+| 4          | 45502810401020000033 | Кредитный счет Габец Е.В.         | -50000.00     | -208000.00       | 158000.00   |
+| 6          | 40817810700000000002 | Карточный счет Габец Е.В.         | 50000.00      | -2000.00         | 52000.00    |
+| 5          | 42301810400000000002 | Депозитный счет Сукнева Н.Ф.      | 100000.00     | 325000.00        | -225000.00  |
+| 3          | 40817810700000000001 | Карточный счет для Сидорова И.П.  | 8000.00       | 112000.00        | -104000.00  |
+| 8          | 40817810700000000003 | Счет с расхождением               | 1000.00       | 3000.00          | -2000.00    |
+| 1          | 45502810401020000022 | Кредитный счет для Сидорова И.П.  | -2000.00      | -1000.00         | -1000.00    |
+| 2          | 42301810400000000001 | Депозитный счет для Сидорова И.П. | 6000.00       | 8000.00          | -2000.00    |
+
+```2.Функция нормализации```
+
+*Функция normalize_account_balances находит все счета, у которых сальдо в таблице accounts не сходится с суммой операций в records, исправляет это сальдо на пересчитанное и возвращает список всех исправленных счетов с их старым и новым балансом*
+```sql
+CREATE OR REPLACE FUNCTION normalize_account_balances()
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    WITH corrected_balances AS (
+        SELECT 
+            a.id,
+            SUM(
+                CASE 
+                    WHEN r.dt = 0 THEN r.sum
+                    ELSE -r.sum
+                END
+            ) AS new_saldo
+        FROM accounts a
+        JOIN records r ON a.id = r.acc_ref
+        GROUP BY a.id
+        HAVING a.saldo <> SUM(
+            CASE 
+                WHEN r.dt = 0 THEN r.sum
+                ELSE -r.sum
+            END
+        )
+    )
+    UPDATE accounts a
+    SET saldo = cb.new_saldo
+    FROM corrected_balances cb
+    WHERE a.id = cb.id;
+END;
+$$;
+```
+```3.Вызываем функцию```
+```sql
+SELECT normalize_account_balances();
+```
+```4.Проверяем результат с помощью скрипта из шага 1```
+| account_id | account_number | account_name | current_saldo | calculated_saldo | discrepancy |
+|------------|----------------|--------------|---------------|------------------|-------------|
+(0 строк)
+
+<!-- TOC --><a name="8"></a>
+**8. Сформируйте выборку, которая вернет информацию о клиентах, которые полностью погасили кредит, но при этом не закрыли продукт.**
+
+[Вверх](#00)
+
+```sql
+SELECT 
+    c.id as client_id,
+    c.name as client_name,
+    p.id as product_id,
+    p.name as product_name,
+    a.id as account_id,
+    a.acc_num as account_number,
+    a.saldo as current_balance,
+    SUM(CASE 
+        WHEN r.dt = 1 THEN r.sum  
+        ELSE -r.sum               
+    END) as net_credit_balance
+FROM clients c
+JOIN products p ON c.id = p.client_ref
+JOIN product_type pt ON p.product_type_id = pt.id
+JOIN accounts a ON p.id = a.product_ref
+JOIN records r ON a.id = r.acc_ref
+WHERE pt.name = 'КРЕДИТ'
+AND p.close_date IS NULL
+GROUP BY c.id, c.name, p.id, p.name, a.id, a.acc_num, a.saldo
+HAVING SUM(CASE 
+    WHEN r.dt = 1 THEN r.sum
+    ELSE -r.sum
+END) >= 0 
+ORDER BY c.name;
+```
+```Вывод:```
+| client_id | client_name               | product_id | product_name                      | account_id | account_number       | current_balance | net_credit_balance |
+|-----------|---------------------------|------------|-----------------------------------|------------|----------------------|-----------------|--------------------|
+| 4         | Габец Евгения Владимировна| 4          | Кредитный договор с Габец Е.В.    | 4          | 45502810401020000033 | -208000.00      | 208000.00          |
+| 1         | Сидоров Иван Петрович     | 1          | Кредитный договор с Сидоровым И.П.| 1          | 45502810401020000022 | -1000.00        | 1000.00            |
+
+<!-- TOC --><a name="9"></a>
+**9. Закройте продукты (установите дату закрытия равную текущей) типа «КРЕДИТ», у которых произошло полное погашение, но при этом не было повторной выдачи.**
+
+(now: 2025-11-28)
+
+[Вверх](#00)
+
+```1.Находим продукты типа КРЕДИТ, которые можно закрыть```
+```sql
+SELECT 
+    p.id as product_id,
+    p.name as product_name,
+    c.name as client_name,
+    a.saldo as current_balance,
+    SUM(CASE 
+        WHEN r.dt = 1 THEN r.sum
+        ELSE -r.sum
+    END) as calculated_balance
+FROM products p
+JOIN product_type pt ON p.product_type_id = pt.id
+JOIN clients c ON p.client_ref = c.id
+JOIN accounts a ON p.id = a.product_ref
+JOIN records r ON a.id = r.acc_ref
+WHERE pt.name = 'КРЕДИТ'
+AND p.close_date IS NULL
+GROUP BY p.id, p.name, c.name, a.saldo
+HAVING SUM(CASE 
+    WHEN r.dt = 1 THEN r.sum
+    ELSE -r.sum
+END) >= 0;
+```
+```Вывод:```
+| product_id | product_name                      | client_name               | current_balance | calculated_balance |
+|------------|-----------------------------------|---------------------------|-----------------|--------------------|
+| 1          | Кредитный договор с Сидоровым И.П.| Сидоров Иван Петрович     | -1000.00        | 1000.00            |
+| 4          | Кредитный договор с Габец Е.В.    | Габец Евгения Владимировна| -208000.00      | 208000.00          |
+
+```2.Закрываем найденные продукты сегодняшней датой```
+```sql
+UPDATE products 
+SET close_date = CURRENT_DATE
+WHERE id IN (
+    SELECT p.id
+    FROM products p
+    JOIN product_type pt ON p.product_type_id = pt.id
+    JOIN accounts a ON p.id = a.product_ref
+    JOIN records r ON a.id = r.acc_ref
+    WHERE pt.name = 'КРЕДИТ'
+    AND p.close_date IS NULL
+    GROUP BY p.id
+    HAVING SUM(CASE 
+        WHEN r.dt = 1 THEN r.sum
+        ELSE -r.sum
+    END) >= 0
+);
+```
+```3.Проверяем результат с помощью скрипта из шага 1 или по скрипту ниже```
+```sql
+SELECT id, name, close_date 
+FROM products 
+WHERE close_date = CURRENT_DATE;
+```
+```Вывод:```
+| id | name                              | close_date |
+|----|-----------------------------------|------------|
+| 1  | Кредитный договор с Сидоровым И.П.| 2025-11-28 |
+| 4  | Кредитный договор с Габец Е.В.    | 2025-11-28 |
