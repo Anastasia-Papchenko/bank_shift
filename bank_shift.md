@@ -15,7 +15,8 @@
 - [7](#7)
 - [8](#8)
 - [9](#9)
-
+- [10](#10)
+- [11](#11)
 
 <!-- TOC --><a name="0"></a>
 **0. Подготовка к выполнению задания. Необходимо создать базу данных. Для выполнения тестового задания использовалась бд - ```PostgreSQL```.**
@@ -531,3 +532,109 @@ WHERE close_date = CURRENT_DATE;
 |----|-----------------------------------|------------|
 | 1  | Кредитный договор с Сидоровым И.П.| 2025-11-28 |
 | 4  | Кредитный договор с Габец Е.В.    | 2025-11-28 |
+
+<!-- TOC --><a name="10"></a>
+**10. Закройте возможность открытия (установите дату окончания действия) для типов продуктов, по счетам продуктов которых, не было движений более одного месяца.**
+
+[Вверх](#00)
+
+```1.Находим, то что будем закрывать```
+```sql
+SELECT 
+    p.id,
+    p.name,
+    p.product_type_id,
+    p.open_date,
+    p.close_date,
+    MAX(r.oper_date) AS last_operation_date
+FROM products p
+LEFT JOIN accounts a ON p.id = a.product_ref
+LEFT JOIN records r ON a.id = r.acc_ref
+WHERE p.close_date IS NULL 
+GROUP BY 
+    p.id, p.name, p.product_type_id, p.open_date, p.close_date
+HAVING 
+    MAX(r.oper_date) IS NULL
+    OR MAX(r.oper_date) < CURRENT_DATE - INTERVAL '1 month'
+ORDER BY last_operation_date NULLS FIRST, p.id;
+```
+```Вывод:```
+| id | name                               | product_type_id | open_date  | close_date | last_operation_date |
+|----|------------------------------------|-----------------|------------|------------|---------------------|
+| 3  | Карточный договор с Сидоровым И.П. | 3               | 2017-08-01 |            | 2017-10-24          |
+| 2  | Депозитный договор с Сидоровым И.П.| 2               | 2017-08-01 |            | 2017-11-26          |
+| 7  | Депозитный договор с Петровым А.И. | 2               | 2024-01-15 |            | 2024-01-15          |
+
+```2.Закрываем```
+```sql
+UPDATE products p
+SET close_date = CURRENT_DATE
+WHERE p.close_date IS NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM accounts a
+      JOIN records r ON a.id = r.acc_ref
+      WHERE a.product_ref = p.id
+        AND r.oper_date >= CURRENT_DATE - INTERVAL '1 month'
+  );
+```
+```3.Проверяем результат с помощью скрипта из шага 1```
+```Вывод:```
+| id | name | product_type_id | open_date | close_date | last_operation_date |
+|----|------|-----------------|-----------|------------|---------------------|
+(0 строк)
+
+<!-- TOC --><a name="11"></a>
+**11. В модель данных добавьте сумму договора по продукту. Заполните поле для всех продуктов суммой максимальной дебетовой операции по счету для продукта типа «КРЕДИТ», и суммой максимальной кредитовой операции по счету продукта для продукта типа «ДЕПОЗИТ» или «КАРТА».**
+
+[Вверх](#00)
+
+```1.Добавляем колонку contract_amount в таблицу products```
+```sql
+ALTER TABLE products
+ADD COLUMN contract_amount numeric(15,2);
+```
+```2.Заполняем поле contract_amount согласно условию```
+```sql
+UPDATE products p
+SET contract_amount = src.contract_amount
+FROM (
+    SELECT 
+        p.id AS product_id,
+        CASE 
+            WHEN pt.name = 'КРЕДИТ' THEN
+                MAX(CASE WHEN r.dt = 1 THEN r.sum END)         
+            WHEN pt.name IN ('ДЕПОЗИТ', 'КАРТА') THEN
+                MAX(CASE WHEN r.dt = 0 THEN r.sum END)         
+            ELSE
+                NULL
+        END AS contract_amount
+    FROM products p
+    JOIN product_type pt ON p.product_type_id = pt.id
+    LEFT JOIN accounts a ON p.id = a.product_ref
+    LEFT JOIN records r ON a.id = r.acc_ref
+    GROUP BY p.id, pt.name
+) AS src
+WHERE p.id = src.product_id;
+```
+```3.Проверяем результат```
+```sql
+SELECT 
+    p.id,
+    p.name AS product_name,
+    pt.name AS product_type,
+    p.contract_amount
+FROM products p
+JOIN product_type pt ON p.product_type_id = pt.id
+ORDER BY pt.name, p.id;
+```
+```Вывод:```
+| id | product_name                       | product_type | contract_amount |
+|----|------------------------------------|--------------|-----------------|
+| 2  | Депозитный договор с Сидоровым И.П.| ДЕПОЗИТ      | 10000.00        |
+| 5  | Депозитный договор с Сукнева Н.Ф.  | ДЕПОЗИТ      | 300000.00       |
+| 7  | Депозитный договор с Петровым А.И. | ДЕПОЗИТ      | 50000.00        |
+| 3  | Карточный договор с Сидоровым И.П. | КАРТА        | 120000.00       |
+| 6  | Карточный договор с Габец Е.В.     | КАРТА        | 5000.00         |
+| 1  | Кредитный договор с Сидоровым И.П. | КРЕДИТ       | 5000.00         |
+| 4  | Кредитный договор с Габец Е.В.     | КРЕДИТ       | 200000.00       |
